@@ -4,23 +4,27 @@ import numpy as np
 from PIL import Image
 
 # --- Configuration & Sidebar ---
-st.set_page_config(page_title="Object Area Calculator", layout="centered")
+st.set_page_config(page_title="Image Segmentation App", layout="centered")
 
 st.sidebar.title("Settings")
-marker_size = st.sidebar.number_input("AruCo Marker Side Length (cm)", min_value=1.0, value=5.0, step=0.1)
-k_value = st.sidebar.slider("K-Means Clusters (k)", min_value=2, max_value=10, value=3)
-attempts = st.sidebar.slider("K-Means Attempts", min_value=1, max_value=20, value=10)
 
-st.title("📏 Object Area Calculator")
-st.markdown(
-    """
-    **Instructions:**
-    1. Upload an image containing an **AruCo Marker** (DICT_5X5_50) and the object you want to measure.
-    2. The app will detect the marker to establish a scale.
-    3. It will segment the image using K-Means clustering.
-    4. Select the specific cluster corresponding to your object to see its real-world area.
-    """
+# Method Selection
+segmentation_method = st.sidebar.selectbox(
+    "Choose Segmentation Method",
+    ("K-Means Clustering", "Otsu's Thresholding")
 )
+
+# Dynamic Sidebar controls based on selection
+params = {}
+if segmentation_method == "K-Means Clustering":
+    params['k_value'] = st.sidebar.slider("Number of Clusters (k)", 2, 10, 3)
+    params['attempts'] = st.sidebar.slider("Attempts", 1, 20, 10)
+elif segmentation_method == "Otsu's Thresholding":
+    st.sidebar.info("Otsu's method automatically finds the optimal threshold value to separate foreground from background.")
+    params['blur'] = st.sidebar.slider("Gaussian Blur Kernel Size (odd numbers only)", 1, 21, 5, step=2)
+
+st.title("🖼️ Image Segmentation App")
+st.markdown("Upload an image to separate objects from the background using different algorithms.")
 
 # --- Helper Functions ---
 
@@ -28,23 +32,7 @@ def load_image(image_file):
     img = Image.open(image_file)
     return np.array(img)
 
-def detect_aruco(image):
-    # Convert to grayscale
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    
-    # Define Dictionary and Parameters
-    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_50)
-    parameters = cv2.aruco.DetectorParameters()
-    
-    # Create Detector
-    detector = cv2.aruco.ArucoDetector(aruco_dict, parameters)
-    
-    # Detect
-    corners, ids, rejected = detector.detectMarkers(gray)
-    
-    return corners, ids
-
-def segment_image_kmeans(img, k=3, attempts=10):
+def segment_kmeans(img, k, attempts):
     # Reshape to 2D array of pixels
     pixel_values = img.reshape((-1, 3))
     pixel_values = np.float32(pixel_values)
@@ -61,82 +49,87 @@ def segment_image_kmeans(img, k=3, attempts=10):
     # Flatten labels
     labels = labels.flatten()
     
-    # Create segmented image
+    # Create visual representation
     segmented_image = centers[labels]
     segmented_image = segmented_image.reshape(img.shape)
     
     return segmented_image, labels, centers
+
+def segment_otsu(img, blur_kernel):
+    # Convert to grayscale
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    
+    # Apply Gaussian Blur to reduce noise (improves Otsu results)
+    if blur_kernel > 1:
+        gray = cv2.GaussianBlur(gray, (blur_kernel, blur_kernel), 0)
+        
+    # Apply Otsu's Thresholding
+    # thresh_val is the optimal threshold found, mask is the binary image
+    thresh_val, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    
+    # Create a segmented color image using the mask
+    # Bitwise AND requires mask to be uint8
+    result = cv2.bitwise_and(img, img, mask=mask)
+    
+    return result, mask, thresh_val
 
 # --- Main App Logic ---
 
 uploaded_file = st.file_uploader("Upload Image", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
-    # 1. Load and Display Original
     original_image = load_image(uploaded_file)
     
-    # Create a copy for visualization
-    display_image = original_image.copy()
+    # Display Original
+    st.subheader("Original Image")
+    st.image(original_image, use_column_width=True)
     
-    st.subheader("1. ArUco Detection")
-    
-    # 2. Detect ArUco
-    corners, ids = detect_aruco(original_image)
-    
-    if corners:
-        # Draw marker
-        int_corners = np.int32(corners)
-        cv2.polylines(display_image, int_corners, True, (0, 255, 0), 5)
+    st.divider()
+
+    # --- K-MEANS LOGIC ---
+    if segmentation_method == "K-Means Clustering":
+        st.subheader("K-Means Results")
         
-        # Calculate Pixel Area of Marker
-        aruco_area_px = cv2.contourArea(corners[0])
+        with st.spinner(f"Clustering with k={params['k_value']}..."):
+            segmented_img, labels, centers = segment_kmeans(
+                original_image, 
+                params['k_value'], 
+                params['attempts']
+            )
         
-        # Calculate Ratio
-        aruco_area_cm = marker_size * marker_size
-        cm2_per_px2 = aruco_area_cm / aruco_area_px
+        st.image(segmented_img, caption="Segmented Image (All Clusters)", use_column_width=True)
         
-        st.image(display_image, caption="Detected Marker", use_column_width=True)
-        st.success(f"Marker Detected! Ratio: {cm2_per_px2:.6f} cm²/px")
-        
-        # 3. Segmentation
-        st.subheader("2. Image Segmentation")
-        
-        with st.spinner("Performing K-Means clustering..."):
-            segmented_img, labels, centers = segment_image_kmeans(original_image, k=k_value, attempts=attempts)
-        
-        st.image(segmented_img, caption=f"Segmented Image (k={k_value})", use_column_width=True)
-        
-        # 4. Area Calculation Selection
-        st.subheader("3. Select Object Cluster")
-        
-        # Display color choices for the user
-        cols = st.columns(k_value)
-        
+        st.markdown("#### Isolate Specific Cluster")
         selected_cluster = st.radio(
-            "Which color represents your object?",
-            options=range(k_value),
-            format_func=lambda x: f"Cluster {x}"
+            "Select a cluster index to visualize:",
+            options=range(params['k_value']),
+            horizontal=True
         )
         
-        # Visualize the chosen cluster only
-        # Mask: True where label matches selected cluster
+        # Create mask for specific cluster
+        # Reshape labels to match image height/width
         mask = labels.reshape(original_image.shape[:2]) == selected_cluster
         
-        # Create a visualization where only the selected object is shown, others black
+        # Apply mask to original image
         isolated_object = original_image.copy()
-        isolated_object[~mask] = [0, 0, 0]
+        isolated_object[~mask] = [0, 0, 0] # Black out everything else
         
-        st.image(isolated_object, caption=f"Isolated Object (Cluster {selected_cluster})", use_column_width=True)
-        
-        # Count pixels
-        object_px_count = np.sum(mask)
-        real_area = object_px_count * cm2_per_px2
-        
-        st.markdown("### 📊 Results")
-        col1, col2 = st.columns(2)
-        col1.metric("Pixel Count", f"{object_px_count} px")
-        col2.metric("Real Area", f"{real_area:.2f} cm²")
+        st.image(isolated_object, caption=f"Cluster {selected_cluster} Isolated", use_column_width=True)
 
-    else:
-        st.error("No ArUco marker detected. Please upload an image with a visible DICT_5X5_50 marker.")
-        st.image(original_image, caption="Original Image", use_column_width=True)
+    # --- OTSU LOGIC ---
+    elif segmentation_method == "Otsu's Thresholding":
+        st.subheader("Otsu's Binarization Results")
+        
+        result, mask, thresh_val = segment_otsu(original_image, params['blur'])
+        
+        st.info(f"Optimal Threshold Value Calculated: {thresh_val}")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.image(mask, caption="Binary Mask (Black/White)", use_column_width=True)
+        
+        with col2:
+            st.image(result, caption="Segmented Result (Mask Applied)", use_column_width=True)
+            
+        st.caption("*Note: Otsu works best when there is a high contrast (bi-modal histogram) between foreground and background.*")
